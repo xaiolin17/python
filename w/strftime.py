@@ -2,7 +2,7 @@
 # -*- coding:utf-8 -*-
 """
 @author:
-@file: gxpt-qjtj-ct
+@file: 
 @time: 2021/9/27 10:00
 @desc: bpm_approve_opinion 审批意见表    bpm_apply 申请单管理
 签章使用时间均以审批完成时间进行统计
