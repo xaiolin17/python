@@ -22,7 +22,7 @@ ipaddr = "1X2.XX.XX.XXX"
 username = "root"
 password = "XXX"
 port = 3306
-db = "oa_prod_bpm_gx"
+db = "oa_"
 
 def connsql(month):
     conn = pymysql.connect(host=ipaddr, user=username, passwd=password, db=db, port=port)
