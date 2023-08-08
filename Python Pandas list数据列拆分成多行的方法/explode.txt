@@ -1,0 +1,1 @@
+after = before.set_index(['id']).apply(lambda x: x.str.split(',').explode()).reset_index()
