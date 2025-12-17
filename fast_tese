@@ -1,0 +1,249 @@
+from sqlalchemy import update
+from module.goods.cruds.car_goods_crud import CarGoodsCRUD
+from module.goods.cruds.inventory_total_crud import GoodsTotalCRUD
+from module.goods.modules.car_goods_module import CarGoods
+from typing import Optional, List
+from sqlalchemy.ext.asyncio import AsyncSession
+from module.goods.modules.inventory_total_module import GoodsTotal
+from module.goods.modules.record_module import CarGoodsRecord
+from module.goods.schemas.car_goods_schema import CarGoodsCreate, CarGoodsPrimaryKey, UpdateStock, CarGoodsResponse
+from module.goods.schemas.goods_schema import GoodsQueryPaginate
+from module.goods.schemas.inventory_total_schema import GoodsTotalCreate
+from module.oss.cruds.oss_crud import OssCrud
+from common import util
+from module.user.models.user_expand_model import UserExpandModel
+
+
+class CarGoodsService:
+    """
+    车商品服务类
+    """
+    def __init__(self, db: AsyncSession):
+        self.car_goods_crud = CarGoodsCRUD(CarGoods, db)
+        self.db = db
+
+    async def create(self,goods_obj: CarGoodsCreate, user_id) -> Optional[bool]:
+        """
+        新增商品
+        + 车商品
+        + 总库存
+        + 车库存记录
+        """
+        try:
+            # + 车商品
+            await self.car_goods_crud.create(goods_obj)
+
+            # + 总库存
+            await GoodsTotalCRUD(GoodsTotal, self.db).create(
+                GoodsTotalCreate(
+                    store_id=goods_obj.store_id,
+                    goods_id=goods_obj.goods_id,
+                    stock=goods_obj.stock
+                )
+            )
+
+            # + 记录
+            user_expand_info = None
+            if user_id:
+                user_expand_info = await self.db.get(UserExpandModel, user_id)
+
+            self.db.add(
+                CarGoodsRecord(
+                    store_id=goods_obj.store_id,
+                    car_id=goods_obj.car_id,
+                    goods_id=goods_obj.goods_id,
+                    stock_initial=0,
+                    action="新增商品",
+                    stock_change=goods_obj.stock,
+                    stock_completion=goods_obj.stock,
+                    operator=user_expand_info.name if user_expand_info else None
+                )
+            )
+
+            await self.db.commit()
+
+            return True
+
+        except Exception as e:
+            await self.db.rollback()
+            if isinstance(e.args, tuple) and isinstance(e.args[0], dict) and e.args[0].get("detail"):
+                raise Exception({
+                    "detail": e.args[0].get("detail"),
+                    "exception": e
+                })
+            raise Exception({
+                "detail": f"新增商品时发生错误",
+                "exception": e
+            })
+
+    async def delete(self, query: CarGoodsPrimaryKey, user_id) -> bool:
+        """
+        根据主键id删除商品
+        - 车商品
+        - 总库存
+        + 车库存记录
+        """
+        try:
+            # 查询商品
+            db_goods = await self.car_goods_crud.get_by_id(query.id)
+
+            # - 车商品
+            await self.car_goods_crud.delete(query.id)
+
+            # - 总库存
+            stmt = update(GoodsTotal).where(
+                GoodsTotal.goods_id == db_goods.goods_id, GoodsTotal.store_id == db_goods.store_id
+            ).values(stock=GoodsTotal.stock - db_goods.stock)
+            await self.db.execute(stmt)
+
+            # + 记录
+            user_expand_info = None
+            if user_id:
+                user_expand_info = await self.db.get(UserExpandModel, user_id)
+
+            self.db.add(
+                CarGoodsRecord(
+                    store_id=db_goods.store_id,
+                    car_id=db_goods.car_id,
+                    goods_id=db_goods.goods_id,
+                    stock_initial=db_goods.stock,
+                    action="删除商品",
+                    stock_change=db_goods.stock,
+                    stock_completion=0,
+                    operator=user_expand_info.name if user_expand_info else None
+                )
+            )
+
+            await self.db.commit()
+            return True
+
+        except Exception as e:
+            await self.db.rollback()
+            if isinstance(e.args, tuple) and isinstance(e.args[0], dict) and e.args[0].get("detail"):
+                raise Exception({
+                    "detail": e.args[0].get("detail"),
+                    "exception": e
+                })
+            raise Exception({
+                "detail": f"删除商品时发生错误",
+                "exception": e
+            })
+
+    async def update_stock(self, query: UpdateStock, user_id) -> Optional[bool]:
+        """
+        更新商品
+        更新车商品
+        更新总库存
+        + 车库存记录
+        """
+        try:
+            db_goods = await self.car_goods_crud.get_by_id(query.id)
+            if not db_goods:
+                raise Exception({
+                    "detail": f"主键ID {query.id} 不存在！",
+                })
+
+            # 计算库存差值
+            stock_change = query.stock - db_goods.stock
+            stock_initial = db_goods.stock
+
+            # 更新车库存
+            stmt = update(CarGoods).where(CarGoods.id == query.id).values(stock=query.stock)
+            await self.db.execute(stmt)
+
+            if stock_change == 0:
+                await self.db.commit()
+                return True
+
+            if stock_change > 0:
+                action = "加库存"
+                stmt = update(GoodsTotal).where(
+                    GoodsTotal.goods_id == db_goods.goods_id,
+                    GoodsTotal.store_id==db_goods.store_id
+                ).values(stock=GoodsTotal.stock + stock_change)
+            if stock_change < 0:
+                action = "减库存"
+                stock_change = abs(stock_change)
+                stmt = update(GoodsTotal).where(
+                    GoodsTotal.goods_id == db_goods.goods_id,
+                    GoodsTotal.store_id == db_goods.store_id
+                ).values(stock=GoodsTotal.stock - stock_change)
+            # 更新总库存
+            await self.db.execute(stmt)
+
+            # + 记录
+            user_expand_info = None
+            if user_id:
+                user_expand_info = await self.db.get(UserExpandModel, user_id)
+
+            self.db.add(
+                CarGoodsRecord(
+                    store_id=db_goods.store_id,
+                    car_id=db_goods.car_id,
+                    goods_id=db_goods.goods_id,
+                    stock_initial=stock_initial,
+                    action=action,
+                    stock_change=stock_change,
+                    stock_completion=query.stock,
+                    operator=user_expand_info.name if user_expand_info else None
+                )
+            )
+
+            await self.db.commit()
+            return True
+
+        except Exception as e:
+            await self.db.rollback()
+            if isinstance(e.args, tuple) and isinstance(e.args[0], dict) and e.args[0].get("detail"):
+                raise Exception({
+                    "detail": e.args[0].get("detail"),
+                    "exception": e
+                })
+            raise Exception({
+                "detail": f"更新商品时发生错误",
+                "exception": e
+            })
+
+    async def search_paginated_list(self, query: GoodsQueryPaginate) -> Optional[dict]:
+        """
+        需要对图片id进行转换
+        """
+        total, items, page, size = await self.car_goods_crud.search_paginated_list(**(query.model_dump(exclude_none=True)))
+
+        oss_crud = OssCrud(session=self.db)
+        result_list: List[CarGoodsResponse] = []
+
+        # 提前收集所有 image_ids 进行批量查询
+        all_image_ids = []
+        for obj_info in items:
+            image_list = obj_info.banner
+            if image_list:
+                if not isinstance(image_list, list):
+                    image_list = [image_list]
+                all_image_ids.extend(image_list)
+
+        # 批量获取 OSS 对象
+        oss_map = {obj.id: obj for obj in await oss_crud.get_by_ids(list(all_image_ids))} if all_image_ids else {}
+
+        for obj_info in items:
+            image_list = obj_info.banner
+            obj_info_dict = obj_info.__dict__.copy()
+
+            if not oss_map or not image_list:
+                images = []
+            else:
+                if not isinstance(image_list, list):
+                    image_list = [image_list]
+                images = [
+                    dict(
+                        id=image_id,
+                        name=oss_obj.file_name,
+                        url=f"{util.oss_url}/{oss_obj.file_name}"
+                    )
+                    for image_id in image_list if (oss_obj := oss_map.get(image_id))  # := 在表达式内部进行变量赋值
+                ]
+            obj_info_dict["images"] = images
+
+            result_list.append(CarGoodsResponse(**obj_info_dict))
+
+        return {'data': result_list, 'page_num': page, 'page_size': size, 'total': total}
